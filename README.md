@@ -536,7 +536,7 @@ Copyright © 2024 Juspay Technologies. All rights reserved.
 
 - **Issues**: [GitHub Issues](https://github.com/MonishJuspay/voice-orchestrator/issues)
 - **Documentation**: [Wiki](https://github.com/MonishJuspay/voice-orchestrator/wiki)
-- **Contact**: Monish P <monish.p@juspay.in>
+- **Contact**: Monish P <monish.p@juspay.in> Harsh Tiwari
 
 ---
 
