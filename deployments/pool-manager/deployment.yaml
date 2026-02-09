@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pool-manager
+  namespace: default
+  labels:
+    app: voice-orchestrator
+    component: pool-manager
+spec:
+  replicas: 1  # IMPORTANT: Must be 1 (no horizontal scaling)
+  strategy:
+    type: Recreate  # Ensure only one instance at a time
+  selector:
+    matchLabels:
+      app: voice-orchestrator
+      component: pool-manager
+  template:
+    metadata:
+      labels:
+        app: voice-orchestrator
+        component: pool-manager
+    spec:
+      serviceAccountName: voice-orchestrator-sa
+      containers:
+      - name: pool-manager
+        image: ghcr.io/monishjuspay/voice-orchestrator-pool-manager:latest
+        imagePullPolicy: Always
+        envFrom:
+        - configMapRef:
+            name: pool-manager-config
+        - secretRef:
+            name: pool-manager-secret
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30

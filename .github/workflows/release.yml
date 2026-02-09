@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.7'
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build binaries
+        run: |
+          make build
+          mkdir -p release
+          cp bin/router release/router-linux-amd64
+          cp bin/pool-manager release/pool-manager-linux-amd64
+          
+          # Build for macOS
+          GOOS=darwin GOARCH=amd64 go build -o release/router-darwin-amd64 ./cmd/router
+          GOOS=darwin GOARCH=amd64 go build -o release/pool-manager-darwin-amd64 ./cmd/pool-manager
+          
+          # Build for macOS ARM
+          GOOS=darwin GOARCH=arm64 go build -o release/router-darwin-arm64 ./cmd/router
+          GOOS=darwin GOARCH=arm64 go build -o release/pool-manager-darwin-arm64 ./cmd/pool-manager
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get the previous tag
+          PREV_TAG=$(git describe --abbrev=0 --tags $(git rev-list --tags --skip=1 --max-count=1) 2>/dev/null || echo "")
+          
+          if [ -z "$PREV_TAG" ]; then
+            echo "First release - no changelog"
+            echo "changelog=First release" >> $GITHUB_OUTPUT
+          else
+            CHANGELOG=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
+            echo "changelog<<EOF" >> $GITHUB_OUTPUT
+            echo "$CHANGELOG" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          body: |
+            ## Changes
+            ${{ steps.changelog.outputs.changelog }}
+            
+            ## Docker Images
+            - `ghcr.io/monishjuspay/voice-orchestrator-router:${{ github.ref_name }}`
+            - `ghcr.io/monishjuspay/voice-orchestrator-pool-manager:${{ github.ref_name }}`
+            
+            ## Installation
+            Download the binary for your platform and make it executable:
+            ```bash
+            chmod +x router-*
+            ./router-linux-amd64  # or your platform
+            ```
+          files: |
+            release/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
