@@ -1,0 +1,32 @@
+steps:
+  # Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'asia-south1-docker.pkg.dev/$PROJECT_ID/smart-router/smart-router:$COMMIT_SHA'
+      - '-t'
+      - 'asia-south1-docker.pkg.dev/$PROJECT_ID/smart-router/smart-router:latest'
+      - '.'
+    dir: /
+
+  # Push the images
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'asia-south1-docker.pkg.dev/$PROJECT_ID/smart-router/smart-router:$COMMIT_SHA'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'asia-south1-docker.pkg.dev/$PROJECT_ID/smart-router/smart-router:latest'
+
+images:
+  - 'asia-south1-docker.pkg.dev/$PROJECT_ID/smart-router/smart-router:$COMMIT_SHA'
+  - 'asia-south1-docker.pkg.dev/$PROJECT_ID/smart-router/smart-router:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _PROJECT_ID: breeze-automatic-prod
