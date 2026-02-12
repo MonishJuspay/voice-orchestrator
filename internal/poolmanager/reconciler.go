@@ -57,6 +57,10 @@ func (m *Manager) syncAllPods(ctx context.Context) error {
 		zap.Int("k8s_pods", len(k8sPods.Items)),
 		zap.Int("ghost_pods_removed", len(allRedisPods)),
 	)
+
+	// 3. Rebalance tiers if any are over/under target
+	m.rebalanceTiers(ctx)
+
 	return nil
 }
 
@@ -276,6 +280,185 @@ func (m *Manager) ensurePodInPool(ctx context.Context, podName, tier string) {
 		} else {
 			m.redis.SAdd(ctx, "voice:pool:"+tier+":available", podName)
 		}
+	}
+}
+
+// rebalanceTiers moves idle pods from over-target tiers to under-target tiers.
+//
+// When tier targets change in Redis config (e.g. gold 3→4, basic 3→2), existing
+// pods stay in their current tier because autoAssignTier only runs for NEW pods.
+// This method detects the imbalance and moves idle pods to satisfy the new targets.
+//
+// Safety guarantees:
+//   - Only moves pods with ZERO active calls (idle)
+//   - Skips pods that are draining or have active leases
+//   - Uses an atomic Lua script for shared pods to prevent race conditions
+//     where a call could be allocated between the idle check and the removal
+func (m *Manager) rebalanceTiers(ctx context.Context) {
+	tierConfig := m.config.GetParsedTierConfig()
+	defaultChain := m.config.GetDefaultChain()
+
+	// Build ordered list of over-target and under-target tiers.
+	// We only rebalance tiers in the default chain (not merchant pools).
+	type tierDelta struct {
+		name  string
+		delta int64 // positive = over-target (has excess), negative = under-target (needs pods)
+	}
+
+	var overTiers, underTiers []tierDelta
+	for _, tier := range defaultChain {
+		cfg, ok := tierConfig[tier]
+		if !ok {
+			continue
+		}
+		assigned, err := m.redis.SCard(ctx, "voice:pool:"+tier+":assigned").Result()
+		if err != nil {
+			m.logger.Warn("rebalance: failed to get assigned count",
+				zap.String("tier", tier), zap.Error(err))
+			continue
+		}
+		diff := assigned - int64(cfg.Target)
+		if diff > 0 {
+			overTiers = append(overTiers, tierDelta{name: tier, delta: diff})
+		} else if diff < 0 {
+			underTiers = append(underTiers, tierDelta{name: tier, delta: -diff}) // store as positive "need"
+		}
+	}
+
+	if len(overTiers) == 0 || len(underTiers) == 0 {
+		return // Nothing to rebalance
+	}
+
+	// Lua script: atomically check ZSCORE==0 and ZREM for shared pods.
+	// Returns 1 if the pod was idle and removed, 0 otherwise.
+	atomicSharedRemove := redis.NewScript(`
+local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
+if score and tonumber(score) == 0 then
+    redis.call('ZREM', KEYS[1], ARGV[1])
+    return 1
+end
+return 0
+`)
+
+	moved := 0
+	for i := range overTiers {
+		ot := &overTiers[i]
+		if ot.delta <= 0 {
+			continue
+		}
+
+		otCfg := tierConfig[ot.name]
+		isShared := otCfg.Type == config.TierTypeShared
+
+		// Get candidate pods in this over-target tier
+		candidates, err := m.redis.SMembers(ctx, "voice:pool:"+ot.name+":assigned").Result()
+		if err != nil {
+			m.logger.Warn("rebalance: failed to list assigned pods",
+				zap.String("tier", ot.name), zap.Error(err))
+			continue
+		}
+
+		for _, podName := range candidates {
+			if ot.delta <= 0 {
+				break // This tier is no longer over-target
+			}
+
+			// Find an under-target tier that still needs pods
+			var target *tierDelta
+			for j := range underTiers {
+				if underTiers[j].delta > 0 {
+					target = &underTiers[j]
+					break
+				}
+			}
+			if target == nil {
+				break // All under-target tiers are satisfied
+			}
+
+			// Skip pods that are draining or have active leases
+			if !m.isPodEligible(ctx, podName) {
+				continue
+			}
+
+			// Check if pod is idle and atomically remove from available pool
+			if isShared {
+				// Shared: atomic ZSCORE==0 check + ZREM
+				result, err := atomicSharedRemove.Run(ctx, m.redis,
+					[]string{"voice:pool:" + ot.name + ":available"},
+					podName,
+				).Int64()
+				if err != nil {
+					m.logger.Warn("rebalance: Lua script failed",
+						zap.String("pod", podName), zap.Error(err))
+					continue
+				}
+				if result == 0 {
+					continue // Pod has active calls, skip
+				}
+				// Pod was atomically removed from available ZSET
+			} else {
+				// Exclusive: try SREM from available SET.
+				// If the pod is NOT in available, it's allocated (has an active call).
+				removed, err := m.redis.SRem(ctx, "voice:pool:"+ot.name+":available", podName).Result()
+				if err != nil {
+					m.logger.Warn("rebalance: failed to remove from exclusive available",
+						zap.String("pod", podName), zap.Error(err))
+					continue
+				}
+				if removed == 0 {
+					continue // Pod is allocated, skip
+				}
+				// Pod was removed from available SET
+			}
+
+			// Pod is confirmed idle and removed from old available pool.
+			// Now complete the move:
+
+			// 1. Remove from old tier's assigned SET
+			m.redis.SRem(ctx, "voice:pool:"+ot.name+":assigned", podName)
+
+			// 2. Delete old tier key
+			m.redis.Del(ctx, "voice:pod:tier:"+podName)
+
+			// 3. Assign to new tier
+			targetCfg := tierConfig[target.name]
+			m.redis.Set(ctx, "voice:pod:tier:"+podName, target.name, 0)
+			m.redis.SAdd(ctx, "voice:pool:"+target.name+":assigned", podName)
+
+			if targetCfg.Type == config.TierTypeShared {
+				m.redis.ZAdd(ctx, "voice:pool:"+target.name+":available", redis.Z{
+					Score:  0,
+					Member: podName,
+				})
+			} else {
+				m.redis.SAdd(ctx, "voice:pool:"+target.name+":available", podName)
+			}
+
+			// 4. Update metadata
+			metadataJSON, err := m.redis.HGet(ctx, "voice:pod:metadata", podName).Result()
+			if err == nil {
+				var metadata models.PodMetadata
+				if json.Unmarshal([]byte(metadataJSON), &metadata) == nil {
+					metadata.Tier = target.name
+					newJSON, _ := json.Marshal(metadata)
+					m.redis.HSet(ctx, "voice:pod:metadata", podName, string(newJSON))
+				}
+			}
+
+			m.logger.Info("Rebalanced pod",
+				zap.String("pod", podName),
+				zap.String("from_tier", ot.name),
+				zap.String("to_tier", target.name),
+			)
+
+			ot.delta--
+			target.delta--
+			moved++
+		}
+	}
+
+	if moved > 0 {
+		m.logger.Info("Rebalancing complete", zap.Int("pods_moved", moved))
 	}
 }
 

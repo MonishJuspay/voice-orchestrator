@@ -61,7 +61,7 @@ spec:
               memory: 256Mi
           livenessProbe:
             httpGet:
-              path: /health
+              path: /nginx-health
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 10
@@ -69,7 +69,7 @@ spec:
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /health
+              path: /nginx-ready
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 5
