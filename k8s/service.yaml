@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: smart-router
+  namespace: voice-system
+  labels:
+    app: smart-router
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+    protocol: TCP
+  selector:
+    app: smart-router

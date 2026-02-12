@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: smart-router-config
+  namespace: voice-system
+  labels:
+    app: smart-router
+data:
+  HTTP_PORT: "8080"
+  METRICS_PORT: "9090"
+  NAMESPACE: "voice-system"
+  POD_LABEL_SELECTOR: "app=voice-agent"
+  LOG_LEVEL: "info"
+  LEADER_ELECTION_ENABLED: "true"
+  # Adjusted for current voice-agent count (3 pods)
+  # - gold: 1 pod for dedicated/merchant-specific
+  # - standard: 1 pod for standard tier
+  # - basic: 1 pod shared with max 3 concurrent calls
+  TIER_CONFIG: '{"gold":{"type":"exclusive","target":1},"standard":{"type":"exclusive","target":1},"basic":{"type":"shared","target":1,"max_concurrent":3}}'

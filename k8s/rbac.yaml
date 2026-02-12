@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: smart-router
+  namespace: voice-system
+  labels:
+    app: smart-router
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: smart-router
+  namespace: voice-system
+  labels:
+    app: smart-router
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods/status"]
+  verbs: ["get"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: smart-router
+  namespace: voice-system
+  labels:
+    app: smart-router
+subjects:
+- kind: ServiceAccount
+  name: smart-router
+  namespace: voice-system
+roleRef:
+  kind: Role
+  name: smart-router
+  apiGroup: rbac.authorization.k8s.io
