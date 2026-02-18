@@ -298,8 +298,8 @@ func (m *Manager) rebalanceTiers(ctx context.Context) {
 	tierConfig := m.config.GetParsedTierConfig()
 	defaultChain := m.config.GetDefaultChain()
 
-	// Build ordered list of over-target and under-target tiers.
-	// We only rebalance tiers in the default chain (not merchant pools).
+	// Pass 1: rebalance default chain tiers.
+	// Merchant pools are handled in a second pass (rebalanceMerchantTiers).
 	type tierDelta struct {
 		name  string
 		delta int64 // positive = over-target (has excess), negative = under-target (needs pods)
@@ -326,7 +326,9 @@ func (m *Manager) rebalanceTiers(ctx context.Context) {
 	}
 
 	if len(overTiers) == 0 || len(underTiers) == 0 {
-		return // Nothing to rebalance
+		// Nothing to rebalance in default chain, but merchant tiers may still need it.
+		m.rebalanceMerchantTiers(ctx, tierConfig, defaultChain)
+		return
 	}
 
 	// Lua script: atomically check ZSCORE==0 and ZREM for shared pods.
@@ -458,7 +460,224 @@ return 0
 	}
 
 	if moved > 0 {
-		m.logger.Info("Rebalancing complete", zap.Int("pods_moved", moved))
+		m.logger.Info("Default chain rebalancing complete", zap.Int("pods_moved", moved))
+	}
+
+	// -----------------------------------------------------------------------
+	// Second pass: rebalance merchant tiers.
+	//
+	// Merchant tiers are those in the config but NOT in the default chain.
+	// If a merchant tier is over-target, donate excess idle pods to any
+	// under-target tier — merchant tiers first (dedicated commitments),
+	// then default chain tiers.
+	// -----------------------------------------------------------------------
+	m.rebalanceMerchantTiers(ctx, tierConfig, defaultChain)
+}
+
+// rebalanceMerchantTiers handles scale-down for merchant tiers.
+//
+// When a merchant tier target is reduced (e.g. redbus 2→1), excess pods are
+// moved to under-target tiers. Priority: under-target merchant tiers first,
+// then under-target default chain tiers.
+func (m *Manager) rebalanceMerchantTiers(ctx context.Context, tierConfig map[string]config.TierConfig, defaultChain []string) {
+	chainSet := make(map[string]bool, len(defaultChain))
+	for _, t := range defaultChain {
+		chainSet[t] = true
+	}
+
+	// Identify merchant tiers (in config but not in default chain, exclusive only)
+	type merchantDelta struct {
+		name  string
+		delta int64
+	}
+
+	var overMerchant []merchantDelta
+	var underMerchant []merchantDelta
+
+	for tier, cfg := range tierConfig {
+		if chainSet[tier] {
+			continue // Part of default chain, handled by first pass
+		}
+		if cfg.Type == config.TierTypeShared {
+			continue // Shared pools are not merchant pools
+		}
+
+		assigned, err := m.redis.SCard(ctx, "voice:merchant:"+tier+":assigned").Result()
+		if err != nil {
+			m.logger.Warn("rebalanceMerchant: failed to get assigned count",
+				zap.String("merchant", tier), zap.Error(err))
+			continue
+		}
+		diff := assigned - int64(cfg.Target)
+		if diff > 0 {
+			overMerchant = append(overMerchant, merchantDelta{name: tier, delta: diff})
+		} else if diff < 0 {
+			underMerchant = append(underMerchant, merchantDelta{name: tier, delta: -diff})
+		}
+	}
+
+	if len(overMerchant) == 0 {
+		return // No merchant tiers are over-target
+	}
+
+	// Also compute under-target default chain tiers (may have changed after first pass)
+	type chainDelta struct {
+		name  string
+		delta int64
+	}
+	var underChain []chainDelta
+	for _, tier := range defaultChain {
+		cfg, ok := tierConfig[tier]
+		if !ok {
+			continue
+		}
+		assigned, err := m.redis.SCard(ctx, "voice:pool:"+tier+":assigned").Result()
+		if err != nil {
+			continue
+		}
+		diff := assigned - int64(cfg.Target)
+		if diff < 0 {
+			underChain = append(underChain, chainDelta{name: tier, delta: -diff})
+		}
+	}
+
+	if len(underMerchant) == 0 && len(underChain) == 0 {
+		return // Nowhere to donate excess pods
+	}
+
+	moved := 0
+	for i := range overMerchant {
+		om := &overMerchant[i]
+		if om.delta <= 0 {
+			continue
+		}
+
+		// Get candidate pods in this over-target merchant pool
+		candidates, err := m.redis.SMembers(ctx, "voice:merchant:"+om.name+":assigned").Result()
+		if err != nil {
+			m.logger.Warn("rebalanceMerchant: failed to list assigned pods",
+				zap.String("merchant", om.name), zap.Error(err))
+			continue
+		}
+
+		for _, podName := range candidates {
+			if om.delta <= 0 {
+				break
+			}
+
+			// Find a destination: under-target merchant tiers first, then default chain
+			var targetName string
+			var targetIsMerchant bool
+
+			for j := range underMerchant {
+				if underMerchant[j].delta > 0 {
+					targetName = underMerchant[j].name
+					targetIsMerchant = true
+					break
+				}
+			}
+			if targetName == "" {
+				for j := range underChain {
+					if underChain[j].delta > 0 {
+						targetName = underChain[j].name
+						targetIsMerchant = false
+						break
+					}
+				}
+			}
+			if targetName == "" {
+				break // All targets satisfied
+			}
+
+			// Skip pods that are draining or have active leases
+			if !m.isPodEligible(ctx, podName) {
+				continue
+			}
+
+			// Merchant pools are exclusive — check if pod is in available set (idle)
+			removed, err := m.redis.SRem(ctx, "voice:merchant:"+om.name+":pods", podName).Result()
+			if err != nil {
+				m.logger.Warn("rebalanceMerchant: failed to remove from merchant available",
+					zap.String("pod", podName), zap.Error(err))
+				continue
+			}
+			if removed == 0 {
+				continue // Pod is allocated (has active call), skip
+			}
+
+			// Pod confirmed idle and removed from old available pool.
+			// Complete the move:
+
+			// 1. Remove from old merchant assigned SET
+			m.redis.SRem(ctx, "voice:merchant:"+om.name+":assigned", podName)
+
+			// 2. Delete old tier key
+			m.redis.Del(ctx, "voice:pod:tier:"+podName)
+
+			// 3. Assign to new tier
+			if targetIsMerchant {
+				m.redis.Set(ctx, "voice:pod:tier:"+podName, "merchant:"+targetName, 0)
+				m.redis.SAdd(ctx, "voice:merchant:"+targetName+":assigned", podName)
+				m.redis.SAdd(ctx, "voice:merchant:"+targetName+":pods", podName)
+			} else {
+				targetCfg := tierConfig[targetName]
+				m.redis.Set(ctx, "voice:pod:tier:"+podName, targetName, 0)
+				m.redis.SAdd(ctx, "voice:pool:"+targetName+":assigned", podName)
+
+				if targetCfg.Type == config.TierTypeShared {
+					m.redis.ZAdd(ctx, "voice:pool:"+targetName+":available", redis.Z{
+						Score:  0,
+						Member: podName,
+					})
+				} else {
+					m.redis.SAdd(ctx, "voice:pool:"+targetName+":available", podName)
+				}
+			}
+
+			// 4. Update metadata
+			metadataJSON, err := m.redis.HGet(ctx, "voice:pod:metadata", podName).Result()
+			if err == nil {
+				var metadata models.PodMetadata
+				if json.Unmarshal([]byte(metadataJSON), &metadata) == nil {
+					if targetIsMerchant {
+						metadata.Tier = "merchant:" + targetName
+					} else {
+						metadata.Tier = targetName
+					}
+					newJSON, _ := json.Marshal(metadata)
+					m.redis.HSet(ctx, "voice:pod:metadata", podName, string(newJSON))
+				}
+			}
+
+			m.logger.Info("Rebalanced merchant pod",
+				zap.String("pod", podName),
+				zap.String("from_merchant", om.name),
+				zap.String("to_tier", targetName),
+				zap.Bool("to_merchant", targetIsMerchant),
+			)
+
+			om.delta--
+			if targetIsMerchant {
+				for j := range underMerchant {
+					if underMerchant[j].name == targetName {
+						underMerchant[j].delta--
+						break
+					}
+				}
+			} else {
+				for j := range underChain {
+					if underChain[j].name == targetName {
+						underChain[j].delta--
+						break
+					}
+				}
+			}
+			moved++
+		}
+	}
+
+	if moved > 0 {
+		m.logger.Info("Merchant tier rebalancing complete", zap.Int("pods_moved", moved))
 	}
 }
 
