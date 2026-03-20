@@ -8,7 +8,6 @@ steps:
       - '-t'
       - 'asia-south1-docker.pkg.dev/$PROJECT_ID/smart-router/smart-router:latest'
       - '.'
-    dir: /
 
   # Push the images
   - name: 'gcr.io/cloud-builders/docker'
@@ -28,5 +27,3 @@ images:
 options:
   logging: CLOUD_LOGGING_ONLY
 
-substitutions:
-  _PROJECT_ID: breeze-automatic-prod

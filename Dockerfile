@@ -15,7 +15,7 @@ RUN go mod download
 COPY . .
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /app/smart-router cmd/smart-router/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /app/smart-router ./cmd/smart-router
 
 # Stage 2: Runtime
 FROM alpine:latest
