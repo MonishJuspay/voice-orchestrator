@@ -14,7 +14,7 @@ type AllocationResult struct {
 
 type AllocationRequest struct {
 	CallSID    string `json:"call_sid"`
-	MerchantID string `json:"merchant_id,omitempty"`
+	ResellerID string `json:"reseller_id,omitempty"`
 	Provider   string `json:"provider,omitempty"`
 	Flow       string `json:"flow,omitempty"`
 	Template   string `json:"template,omitempty"`
@@ -68,7 +68,7 @@ type PodMetadata struct {
 type CallInfo struct {
 	PodName     string `json:"pod_name"`
 	SourcePool  string `json:"source_pool"`
-	MerchantID  string `json:"merchant_id"`
+	ResellerID  string `json:"reseller_id"`
 	AllocatedAt string `json:"allocated_at"`
 }
 

@@ -61,12 +61,12 @@ func (h *AllocateHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call allocator
-	result, err := h.allocator.Allocate(ctx, req.CallSID, req.MerchantID, provider, flow, req.Template)
+	result, err := h.allocator.Allocate(ctx, req.CallSID, req.ResellerID, provider, flow, req.Template)
 	if err != nil {
 		h.logger.Error("allocation failed",
 			zap.Error(err),
 			zap.String("call_sid", req.CallSID),
-			zap.String("merchant_id", req.MerchantID),
+			zap.String("reseller_id", req.ResellerID),
 		)
 
 		switch err {
@@ -122,8 +122,8 @@ func (h *AllocateHandler) HandleTwilio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get merchant_id, flow, and template from query parameters
-	merchantID := r.URL.Query().Get("merchant_id")
+	// Get reseller_id, flow, and template from query parameters
+	resellerID := r.URL.Query().Get("reseller_id")
 	flow := r.URL.Query().Get("flow")
 	if flow == "" {
 		flow = "v2"
@@ -132,13 +132,13 @@ func (h *AllocateHandler) HandleTwilio(w http.ResponseWriter, r *http.Request) {
 
 	h.logger.Info("twilio allocation request",
 		zap.String("call_sid", callSID),
-		zap.String("merchant_id", merchantID),
+		zap.String("reseller_id", resellerID),
 		zap.String("flow", flow),
 		zap.String("template", template),
 	)
 
 	// Call allocator
-	result, err := h.allocator.Allocate(ctx, callSID, merchantID, "twilio", flow, template)
+	result, err := h.allocator.Allocate(ctx, callSID, resellerID, "twilio", flow, template)
 	if err != nil {
 		h.logger.Error("twilio allocation failed",
 			zap.Error(err),
@@ -190,8 +190,8 @@ func (h *AllocateHandler) HandlePlivo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get merchant_id, flow, and template from query parameters
-	merchantID := r.URL.Query().Get("merchant_id")
+	// Get reseller_id, flow, and template from query parameters
+	resellerID := r.URL.Query().Get("reseller_id")
 	flow := r.URL.Query().Get("flow")
 	if flow == "" {
 		flow = "v2"
@@ -200,13 +200,13 @@ func (h *AllocateHandler) HandlePlivo(w http.ResponseWriter, r *http.Request) {
 
 	h.logger.Info("plivo allocation request",
 		zap.String("call_uuid", callUUID),
-		zap.String("merchant_id", merchantID),
+		zap.String("reseller_id", resellerID),
 		zap.String("flow", flow),
 		zap.String("template", template),
 	)
 
 	// Call allocator (use CallUUID as callSID)
-	result, err := h.allocator.Allocate(ctx, callUUID, merchantID, "plivo", flow, template)
+	result, err := h.allocator.Allocate(ctx, callUUID, resellerID, "plivo", flow, template)
 	if err != nil {
 		h.logger.Error("plivo allocation failed",
 			zap.Error(err),
@@ -233,7 +233,7 @@ func (h *AllocateHandler) HandlePlivo(w http.ResponseWriter, r *http.Request) {
 // ExotelRequest represents an Exotel webhook request
 type ExotelRequest struct {
 	CallSID    string `json:"CallSid"`
-	MerchantID string `json:"merchant_id,omitempty"`
+	ResellerID string `json:"reseller_id,omitempty"`
 	Flow       string `json:"flow,omitempty"`
 	Template   string `json:"template,omitempty"`
 }
@@ -263,7 +263,7 @@ func (h *AllocateHandler) HandleExotel(w http.ResponseWriter, r *http.Request) {
 
 	h.logger.Info("exotel allocation request",
 		zap.String("call_sid", req.CallSID),
-		zap.String("merchant_id", req.MerchantID),
+		zap.String("reseller_id", req.ResellerID),
 	)
 
 	// Default flow
@@ -273,7 +273,7 @@ func (h *AllocateHandler) HandleExotel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call allocator
-	result, err := h.allocator.Allocate(ctx, req.CallSID, req.MerchantID, "exotel", flow, req.Template)
+	result, err := h.allocator.Allocate(ctx, req.CallSID, req.ResellerID, "exotel", flow, req.Template)
 	if err != nil {
 		h.logger.Error("exotel allocation failed",
 			zap.Error(err),

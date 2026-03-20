@@ -55,7 +55,7 @@ func NewAllocator(redis *redis.Client, cfg *config.Config, logger *zap.Logger) *
 //  1. If merchant has a dedicated pool → prepend "merchant:{pool}" to the chain
 //  2. If merchant has a custom Fallback list → use it as the base
 //  3. Otherwise → use the system-wide DefaultChain from TIER_CONFIG
-func (a *Allocator) Allocate(ctx context.Context, callSID, merchantID, provider, flow, template string) (*models.AllocationResult, error) {
+func (a *Allocator) Allocate(ctx context.Context, callSID, resellerID, provider, flow, template string) (*models.AllocationResult, error) {
 	if callSID == "" {
 		return nil, ErrInvalidCallSID
 	}
@@ -77,10 +77,10 @@ func (a *Allocator) Allocate(ctx context.Context, callSID, merchantID, provider,
 	}
 
 	// 2. Get merchant config (defaults to empty → uses DefaultChain)
-	merchantConfig, err := GetMerchantConfig(ctx, a.redis, merchantID)
+	merchantConfig, err := GetMerchantConfig(ctx, a.redis, resellerID)
 	if err != nil {
 		a.logger.Warn("failed to get merchant config, using defaults",
-			zap.Error(err), zap.String("merchant_id", merchantID))
+			zap.Error(err), zap.String("reseller_id", resellerID))
 		merchantConfig = models.MerchantConfig{}
 	}
 
@@ -100,7 +100,7 @@ func (a *Allocator) Allocate(ctx context.Context, callSID, merchantID, provider,
 	if podName == "" {
 		a.logger.Warn("no pods available for allocation",
 			zap.String("call_sid", callSID),
-			zap.String("merchant_id", merchantID),
+			zap.String("reseller_id", resellerID),
 			zap.Strings("chain", chain))
 		middleware.AllocationsTotal.WithLabelValues("", "no_pods").Inc()
 		return nil, ErrNoPodsAvailable
@@ -108,7 +108,7 @@ func (a *Allocator) Allocate(ctx context.Context, callSID, merchantID, provider,
 
 	// 5. Store allocation info in Redis
 	now := time.Now()
-	if err := a.storeAllocation(ctx, callSID, podName, sourcePool, merchantID, now); err != nil {
+	if err := a.storeAllocation(ctx, callSID, podName, sourcePool, resellerID, now); err != nil {
 		a.logger.Error("failed to store allocation, returning pod to pool",
 			zap.Error(err),
 			zap.String("call_sid", callSID),
@@ -131,7 +131,7 @@ func (a *Allocator) Allocate(ctx context.Context, callSID, merchantID, provider,
 		zap.String("call_sid", callSID),
 		zap.String("pod_name", podName),
 		zap.String("source_pool", sourcePool),
-		zap.String("merchant_id", merchantID))
+		zap.String("reseller_id", resellerID))
 
 	middleware.AllocationsTotal.WithLabelValues(sourcePool, "success").Inc()
 	middleware.ActiveCalls.Inc()
@@ -238,7 +238,7 @@ func (a *Allocator) buildWSURL(podName, provider, flow, template string) string 
 
 // storeAllocation stores the call→pod mapping and pod status in Redis.
 // Overwrites the placeholder lock set by CheckAndLockAllocation.
-func (a *Allocator) storeAllocation(ctx context.Context, callSID, podName, sourcePool, merchantID string, allocatedAt time.Time) error {
+func (a *Allocator) storeAllocation(ctx context.Context, callSID, podName, sourcePool, resellerID string, allocatedAt time.Time) error {
 	callKey := callInfoPrefix + callSID
 	ts := strconv.FormatInt(allocatedAt.Unix(), 10)
 
@@ -246,7 +246,7 @@ func (a *Allocator) storeAllocation(ctx context.Context, callSID, podName, sourc
 	callData := map[string]interface{}{
 		"pod_name":     podName,
 		"source_pool":  sourcePool,
-		"merchant_id":  merchantID,
+		"reseller_id":  resellerID,
 		"allocated_at": ts,
 	}
 	if err := a.redis.HSet(ctx, callKey, callData).Err(); err != nil {
