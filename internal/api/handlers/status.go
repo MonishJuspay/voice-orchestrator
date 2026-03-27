@@ -47,19 +47,12 @@ func (h *StatusHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("status check: redis down", zap.Error(err))
 	}
 
-	// Count active calls via lease key scan
+	// Build pool info from config + Redis, and compute active calls from pool
+	// state. Previous approach counted voice:lease:* keys, which is unreliable
+	// because leases have a 15-min TTL and persist after calls end (stale leases
+	// inflate the count). Pool state (assigned - available for exclusive tiers,
+	// sum of ZSET scores for shared tiers) is always authoritative.
 	activeCalls := 0
-	if redisStatus == "up" {
-		iter := h.redis.GetRedis().Scan(ctx, 0, "voice:lease:*", 100).Iterator()
-		for iter.Next(ctx) {
-			activeCalls++
-		}
-		if err := iter.Err(); err != nil {
-			h.logger.Warn("failed to scan active calls", zap.Error(err))
-		}
-	}
-
-	// Build pool info from config + Redis
 	pools := make(map[string]models.PoolInfo)
 	if redisStatus == "up" && h.config != nil {
 		client := h.redis.GetRedis()
@@ -92,11 +85,29 @@ func (h *StatusHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			var available int64
 			if !isMerchant && cfg.Type == config.TierTypeShared {
 				available, err = client.ZCard(ctx, availableKey).Result()
+				if err != nil {
+					h.logger.Warn("failed to get available count", zap.String("tier", tier), zap.Error(err))
+				}
+				// For shared pools, active calls = sum of ZSET scores
+				// (each score represents concurrent calls on that pod)
+				scores, zErr := client.ZRangeWithScores(ctx, availableKey, 0, -1).Result()
+				if zErr == nil {
+					for _, z := range scores {
+						if z.Score > 0 {
+							activeCalls += int(z.Score)
+						}
+					}
+				}
 			} else {
 				available, err = client.SCard(ctx, availableKey).Result()
-			}
-			if err != nil {
-				h.logger.Warn("failed to get available count", zap.String("tier", tier), zap.Error(err))
+				if err != nil {
+					h.logger.Warn("failed to get available count", zap.String("tier", tier), zap.Error(err))
+				}
+				// For exclusive pools, active calls = assigned - available
+				busy := int(assigned) - int(available)
+				if busy > 0 {
+					activeCalls += busy
+				}
 			}
 
 			pools[tier] = models.PoolInfo{
